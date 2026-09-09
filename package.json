@@ -1,0 +1,16 @@
+{
+  "name": "iitgoa-wifi-login",
+  "version": "1.0.0",
+  "description": "Automatic IIT Goa WiFi captive portal login utility",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "reset": "node app.js --reset",
+    "debug": "node app.js --verbose"
+  },
+  "dependencies": {
+    "keytar": "^7.9.0",
+    "node-notifier": "^6.0.0",
+    "playwright": "^1.63.0"
+  }
+}
