@@ -8,691 +8,250 @@ const readline = require("readline");
 // ============================================================
 
 const CONFIG = {
-    // HTTP URL intentionally used to trigger FortiGate
-    // captive portal interception.
-    testUrl: "http://example.com/",
+  // Windows captive portal connectivity test
+  testUrl: "http://www.msftconnecttest.com/redirect",
 
-    // IIT Goa FortiGate hostname.
-    fortigateHost: "firewall.iitgoa.ac.in",
+  // IIT Goa captive portal
+  portalHost: "firewall.iitgoa.ac.in",
+  portalPort: "6082",
+  portalPath: "/php/uid.php",
 
-    // Windows Credential Manager identifiers.
-    credentialService: "IITGoa-WiFi-Login",
-    usernameKey: "username",
+  // Windows Credential Manager entry
+  credentialService: "IITGoa-WiFi-Login",
 
-    // Network/browser timeouts.
-    navigationTimeout: 15000,
-    portalWait: 2500,
-    loginWait: 3000,
+  usernameKey: "username",
 
-    // Retry settings.
-    maxRetries: 3,
-    retryDelay: 1500,
+  navigationTimeout: 15000,
+  loginWait: 3000,
 
-    // Enable/disable Windows notifications.
-    notifications: true
+  maxRetries: 3,
+  retryDelay: 1500,
+
+  notifications: true
 };
 
 
 // ============================================================
-// COMMAND LINE OPTIONS
+// UTILITY FUNCTIONS
 // ============================================================
 
-const args = process.argv.slice(2);
-
-const RESET_CREDENTIALS =
-    args.includes("--reset");
-
-const VERBOSE =
-    args.includes("--verbose");
-
-const HELP =
-    args.includes("--help") ||
-    args.includes("-h");
-
-
-// ============================================================
-// LOGGING
-// ============================================================
-
-function log(message = "") {
-    console.log(message);
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-
-function debug(message = "") {
-
-    if (VERBOSE) {
-        console.log(`[DEBUG] ${message}`);
-    }
-}
-
-
-// ============================================================
-// WINDOWS NOTIFICATIONS
-// ============================================================
 
 function notify(title, message) {
+  if (!CONFIG.notifications) return;
 
-    if (!CONFIG.notifications) {
-        return;
-    }
-
-    try {
-
-        notifier.notify({
-            title,
-            message,
-            wait: false
-        });
-
-    } catch (error) {
-
-        debug(
-            `Notification error: ${error.message}`
-        );
-    }
+  notifier.notify({
+    title,
+    message,
+    wait: false
+  });
 }
 
 
 // ============================================================
-// HELP
+// PALO ALTO PORTAL DETECTION
 // ============================================================
 
-function showHelp() {
+function isPaloAltoPortal(url) {
+  try {
+    const parsed = new URL(url);
 
-    console.log(`
-IIT Goa WiFi Login
-
-Usage:
-
-    node app.js
-        Check IIT Goa WiFi and automatically authenticate
-        if authentication is required.
-
-    node app.js --reset
-        Delete saved IIT Goa WiFi credentials.
-
-    node app.js --verbose
-        Show detailed debugging information.
-
-    node app.js --help
-        Show this help message.
-`);
-}
-
-
-// ============================================================
-// CONSOLE INPUT
-// ============================================================
-
-function ask(question) {
-
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-
-    return new Promise(resolve => {
-
-        rl.question(question, answer => {
-
-            rl.close();
-
-            resolve(answer.trim());
-        });
-    });
-}
-
-
-function askPassword(question) {
-
-    return new Promise(resolve => {
-
-        process.stdout.write(question);
-
-        const stdin = process.stdin;
-
-        stdin.setRawMode(true);
-        stdin.resume();
-
-        let password = "";
-
-        function onData(data) {
-
-            const char = data.toString();
-
-            // ENTER
-            if (
-                char === "\r" ||
-                char === "\n"
-            ) {
-
-                stdin.setRawMode(false);
-                stdin.pause();
-
-                stdin.removeListener(
-                    "data",
-                    onData
-                );
-
-                process.stdout.write("\n");
-
-                resolve(password);
-
-                return;
-            }
-
-            // CTRL+C
-            if (char === "\u0003") {
-
-                stdin.setRawMode(false);
-                stdin.pause();
-
-                stdin.removeListener(
-                    "data",
-                    onData
-                );
-
-                process.exit(1);
-            }
-
-            // BACKSPACE
-            if (char === "\u007f") {
-
-                password =
-                    password.slice(0, -1);
-
-                return;
-            }
-
-            password += char;
-        }
-
-        stdin.on("data", onData);
-    });
-}
-
-
-// ============================================================
-// WINDOWS CREDENTIAL MANAGER
-// ============================================================
-
-async function getStoredCredentials() {
-
-    debug(
-        "Checking Windows Credential Manager..."
+    return (
+      parsed.hostname === CONFIG.portalHost &&
+      parsed.port === CONFIG.portalPort &&
+      parsed.pathname === CONFIG.portalPath
     );
-
-    const username =
-        await keytar.getPassword(
-            CONFIG.credentialService,
-            CONFIG.usernameKey
-        );
-
-    if (!username) {
-
-        debug(
-            "No saved username found."
-        );
-
-        return null;
-    }
-
-
-    const password =
-        await keytar.getPassword(
-            CONFIG.credentialService,
-            username
-        );
-
-    if (!password) {
-
-        debug(
-            "Username found but password is missing."
-        );
-
-        return null;
-    }
-
-
-    debug(
-        "Saved credentials found."
-    );
-
-    return {
-        username,
-        password
-    };
+  } catch {
+    return false;
+  }
 }
 
 
-async function saveCredentials(
+// ============================================================
+// CONNECTIVITY CHECK
+// ============================================================
+
+async function checkConnectivity(page) {
+  try {
+    await page.goto(CONFIG.testUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: CONFIG.navigationTimeout
+    });
+  } catch (error) {
+    // Captive portals can interrupt navigation with redirects.
+    // We still inspect the final URL.
+  }
+
+  await sleep(1000);
+
+  const currentUrl = page.url();
+
+  return currentUrl;
+}
+
+
+// ============================================================
+// CREDENTIAL MANAGEMENT
+// ============================================================
+
+async function getSavedCredentials() {
+  const username = await keytar.getPassword(
+    CONFIG.credentialService,
+    CONFIG.usernameKey
+  );
+
+  // No username saved
+  if (!username) {
+    return null;
+  }
+
+  const password = await keytar.getPassword(
+    CONFIG.credentialService,
+    username
+  );
+
+  // Username exists but password doesn't
+  if (!password) {
+    return null;
+  }
+
+  return {
     username,
     password
-) {
+  };
+}
 
-    await keytar.setPassword(
-        CONFIG.credentialService,
-        CONFIG.usernameKey,
-        username
-    );
+function askQuestion(question, hidden = false) {
+  return new Promise(resolve => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
 
-    await keytar.setPassword(
-        CONFIG.credentialService,
-        username,
-        password
-    );
+    if (!hidden) {
+      rl.question(question, answer => {
+        rl.close();
+        resolve(answer.trim());
+      });
+
+      return;
+    }
+
+    // Windows CMD password input.
+    // Characters are not echoed.
+    process.stdout.write(question);
+
+    let password = "";
+
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+
+    const onData = char => {
+      char = char.toString();
+
+      if (char === "\r" || char === "\n") {
+        process.stdin.setRawMode(false);
+        process.stdin.removeListener("data", onData);
+        rl.close();
+
+        console.log();
+        resolve(password);
+        return;
+      }
+
+      if (char === "\u0003") {
+        process.exit();
+      }
+
+      // Backspace
+      if (char === "\b" || char === "\x7f") {
+        password = password.slice(0, -1);
+        return;
+      }
+
+      password += char;
+    };
+
+    process.stdin.on("data", onData);
+  });
 }
 
 
-async function deleteCredentials() {
+async function saveCredentials(username, password) {
+  await keytar.setPassword(
+    CONFIG.credentialService,
+    CONFIG.usernameKey,
+    username
+  );
 
-    log(
-        "Removing saved IIT Goa WiFi credentials..."
-    );
-
-    const username =
-        await keytar.getPassword(
-            CONFIG.credentialService,
-            CONFIG.usernameKey
-        );
-
-
-    if (username) {
-
-        await keytar.deletePassword(
-            CONFIG.credentialService,
-            username
-        );
-    }
-
-
-    await keytar.deletePassword(
-        CONFIG.credentialService,
-        CONFIG.usernameKey
-    );
-
-
-    log("✓ Saved credentials removed.");
+  await keytar.setPassword(
+    CONFIG.credentialService,
+    username,
+    password
+  );
 }
 
 
 async function getCredentials() {
+  let credentials = await getSavedCredentials();
 
-    /*
-     * First attempt to retrieve saved credentials.
-     */
-    const stored =
-        await getStoredCredentials();
+  if (credentials) {
+    return credentials;
+  }
 
+  console.log("No saved IIT Goa WiFi credentials found.");
+  console.log("Please enter them once.");
+  console.log();
 
-    if (stored) {
+  const username = await askQuestion("Username: ");
+  const password = await askQuestion("Password: ", true);
 
-        log(
-            "Using saved IIT Goa credentials."
-        );
+  await saveCredentials(username, password);
 
-        return stored;
-    }
+  console.log("Credentials saved securely in Windows Credential Manager.");
+  console.log();
 
-
-    /*
-     * First-time setup.
-     */
-    log("");
-    log("---------------------------------");
-    log("IIT Goa WiFi first-time setup");
-    log("---------------------------------");
-    log("");
-
-
-    const username =
-        await ask("Username: ");
-
-
-    if (!username) {
-
-        throw new Error(
-            "Username cannot be empty."
-        );
-    }
-
-
-    const password =
-        await askPassword("Password: ");
-
-
-    if (!password) {
-
-        throw new Error(
-            "Password cannot be empty."
-        );
-    }
-
-
-    await saveCredentials(
-        username,
-        password
-    );
-
-
-    log("");
-    log(
-        "✓ Credentials saved securely."
-    );
-    log("");
-
-
-    return {
-        username,
-        password
-    };
+  return {
+    username,
+    password
+  };
 }
 
 
 // ============================================================
-// FORTIGATE DETECTION
+// PALO ALTO LOGIN
 // ============================================================
 
-function isFortiGatePage(url) {
+async function performPaloAltoLogin(page, credentials) {
+  console.log("Palo Alto Authentication Portal detected.");
 
-    if (!url) {
-        return false;
-    }
+  // Wait for the login form to appear.
+  await page.waitForSelector("#login_form", {
+    timeout: CONFIG.navigationTimeout
+  });
 
+  console.log("Login form detected.");
 
-    return (
-        url.includes(
-            CONFIG.fortigateHost
-        ) &&
-        (
-            url.includes("/fgtauth") ||
-            url.includes("/login")
-        )
-    );
-}
+  // Fill username.
+  await page.locator("#user").fill(credentials.username);
 
+  // Fill password.
+  await page.locator("#passwd").fill(credentials.password);
 
-// ============================================================
-// CONNECTIVITY TEST
-// ============================================================
+  console.log("Submitting credentials...");
 
-async function checkConnectivity(page) {
+  // IMPORTANT:
+  // We do NOT construct the POST URL ourselves.
+  // The page already contains the correct dynamic action URL,
+  // including token, vsys, rule, and redirect URL.
+  await page.locator("#submit").click();
 
-    for (
-        let attempt = 1;
-        attempt <= CONFIG.maxRetries;
-        attempt++
-    ) {
+  await sleep(CONFIG.loginWait);
 
-        debug(
-            `Connectivity attempt ${attempt}/${CONFIG.maxRetries}`
-        );
-
-
-        try {
-
-            await page.goto(
-                CONFIG.testUrl,
-                {
-                    waitUntil: "commit",
-                    timeout:
-                        CONFIG.navigationTimeout
-                }
-            );
-
-
-            /*
-             * Give FortiGate time to perform
-             * captive portal interception.
-             */
-            await page.waitForTimeout(
-                CONFIG.portalWait
-            );
-
-
-            const url =
-                page.url();
-
-
-            debug(
-                `Resulting URL: ${url}`
-            );
-
-
-            return {
-                success: true,
-                url
-            };
-
-
-        } catch (error) {
-
-            debug(
-                `Attempt ${attempt} failed: ${error.message}`
-            );
-
-
-            if (
-                attempt <
-                CONFIG.maxRetries
-            ) {
-
-                await new Promise(
-                    resolve =>
-                        setTimeout(
-                            resolve,
-                            CONFIG.retryDelay
-                        )
-                );
-            }
-        }
-    }
-
-
-    return {
-        success: false,
-        url: null
-    };
-}
-
-
-// ============================================================
-// FIND FORTIGATE LOGIN FORM
-// ============================================================
-
-async function findLoginForm(page) {
-
-    const usernameField =
-        page.locator("#ft_un");
-
-    const passwordField =
-        page.locator("#ft_pd");
-
-
-    if (
-        await usernameField.count() === 0
-    ) {
-
-        return null;
-    }
-
-
-    if (
-        await passwordField.count() === 0
-    ) {
-
-        return null;
-    }
-
-
-    return {
-        usernameField,
-        passwordField
-    };
-}
-
-
-// ============================================================
-// FORTIGATE LOGIN
-// ============================================================
-
-async function performLogin(page) {
-
-    log(
-        "Authentication required."
-    );
-
-
-    debug(
-        "FortiGate login page detected."
-    );
-
-
-    // --------------------------------------------------------
-    // Locate login form
-    // --------------------------------------------------------
-
-    const form =
-        await findLoginForm(page);
-
-
-    if (!form) {
-
-        throw new Error(
-            "FortiGate login form was not found."
-        );
-    }
-
-
-    // --------------------------------------------------------
-    // Find dynamic magic value
-    // --------------------------------------------------------
-
-    const magicField =
-        page.locator(
-            'input[name="magic"]'
-        );
-
-
-    if (
-        await magicField.count() === 0
-    ) {
-
-        throw new Error(
-            "FortiGate magic field was not found."
-        );
-    }
-
-
-    const magic =
-        await magicField.inputValue();
-
-
-    /*
-     * We deliberately don't print the actual magic value.
-     */
-    debug(
-        `Dynamic authentication token detected (${magic.length} characters).`
-    );
-
-
-    // --------------------------------------------------------
-    // Get redirect destination
-    // --------------------------------------------------------
-
-    const redirectField =
-        page.locator(
-            'input[name="4Tredir"]'
-        );
-
-
-    if (
-        await redirectField.count() > 0
-    ) {
-
-        const redirectURL =
-            await redirectField.inputValue();
-
-
-        debug(
-            `Redirect destination: ${redirectURL}`
-        );
-    }
-
-
-    // --------------------------------------------------------
-    // Get credentials
-    // --------------------------------------------------------
-
-    const credentials =
-        await getCredentials();
-
-
-    // --------------------------------------------------------
-    // Fill username
-    // --------------------------------------------------------
-
-    await form.usernameField.fill(
-        credentials.username
-    );
-
-
-    // --------------------------------------------------------
-    // Fill password
-    // --------------------------------------------------------
-
-    await form.passwordField.fill(
-        credentials.password
-    );
-
-
-    // --------------------------------------------------------
-    // Locate Login button
-    // --------------------------------------------------------
-
-    const loginButton =
-        page.locator(
-            'input[type="submit"]'
-        );
-
-
-    if (
-        await loginButton.count() === 0
-    ) {
-
-        throw new Error(
-            "FortiGate Login button was not found."
-        );
-    }
-
-
-    // --------------------------------------------------------
-    // Submit
-    // --------------------------------------------------------
-
-    log(
-        "Submitting credentials..."
-    );
-
-
-    await loginButton
-        .first()
-        .click();
-
-
-    /*
-     * Give FortiGate time to process
-     * the authentication.
-     */
-    await page.waitForTimeout(
-        CONFIG.loginWait
-    );
-
-
-    debug(
-        `Post-login URL: ${page.url()}`
-    );
+  console.log(`After login: ${page.url()}`);
 }
 
 
@@ -701,63 +260,129 @@ async function performLogin(page) {
 // ============================================================
 
 async function verifyAuthentication(page) {
+  console.log("Verifying Internet connectivity...");
 
-    log(
-        "Verifying Internet access..."
+  const finalUrl = await checkConnectivity(page);
+
+  console.log(`Verification URL: ${finalUrl}`);
+
+  if (isPaloAltoPortal(finalUrl)) {
+    return false;
+  }
+
+  return true;
+}
+
+
+// ============================================================
+// SINGLE LOGIN ATTEMPT
+// ============================================================
+
+async function loginAttempt(page, credentials) {
+  console.log("Checking IIT Goa WiFi authentication...");
+
+  const currentUrl = await checkConnectivity(page);
+
+  console.log(`Current URL: ${currentUrl}`);
+
+  // ----------------------------------------------------------
+  // Already authenticated
+  // ----------------------------------------------------------
+
+  if (!isPaloAltoPortal(currentUrl)) {
+    console.log("✓ Internet access is already available.");
+
+    notify(
+      "IIT Goa WiFi",
+      "✓ Already connected."
     );
 
+    return true;
+  }
 
-    try {
+  // ----------------------------------------------------------
+  // Captive portal detected
+  // ----------------------------------------------------------
 
-        await page.goto(
-            CONFIG.testUrl,
-            {
-                waitUntil:
-                    "domcontentloaded",
+  console.log("Authentication required.");
 
-                timeout:
-                    CONFIG.navigationTimeout
-            }
-        );
+  await performPaloAltoLogin(page, credentials);
 
+  // ----------------------------------------------------------
+  // Verify login
+  // ----------------------------------------------------------
 
-        await page.waitForTimeout(
-            1000
-        );
+  const authenticated = await verifyAuthentication(page);
 
+  if (authenticated) {
+    console.log("✓ Successfully authenticated.");
 
-        const url =
-            page.url();
+    notify(
+      "IIT Goa WiFi",
+      "✓ Successfully authenticated."
+    );
 
+    return true;
+  }
 
-        debug(
-            `Verification URL: ${url}`
-        );
+  console.log("✗ Authentication failed.");
 
-
-        /*
-         * If we're redirected back to FortiGate,
-         * authentication failed.
-         */
-        if (
-            isFortiGatePage(url)
-        ) {
-
-            return false;
-        }
+  return false;
+}
 
 
-        return true;
+// ============================================================
+// RESET SAVED CREDENTIALS
+// ============================================================
+
+async function resetCredentials() {
+  const username = await keytar.getPassword(
+    CONFIG.credentialService,
+    CONFIG.usernameKey
+  );
+
+  if (!username) {
+    console.log("No saved credentials found.");
+    return;
+  }
+
+  await keytar.deletePassword(
+    CONFIG.credentialService,
+    CONFIG.usernameKey
+  );
+
+  await keytar.deletePassword(
+    CONFIG.credentialService,
+    username
+  );
+
+  console.log("Saved credentials removed.");
+}
 
 
-    } catch (error) {
+// ============================================================
+// HELP
+// ============================================================
 
-        debug(
-            `Verification error: ${error.message}`
-        );
+function showHelp() {
+  console.log(`
+IIT Goa WiFi Auto Login
+=======================
 
-        return false;
-    }
+Usage:
+
+  node app.js
+      Check WiFi and automatically log in if necessary.
+
+  node app.js --reset
+      Remove saved WiFi credentials.
+
+  node app.js --verbose
+      Run with additional console output.
+
+  node app.js --help
+      Show this help message.
+`);
 }
 
 
@@ -767,252 +392,127 @@ async function verifyAuthentication(page) {
 
 async function main() {
 
-    let browser = null;
+  const args = process.argv.slice(2);
 
+  if (args.includes("--help")) {
+    showHelp();
+    return;
+  }
 
-    try {
+  if (args.includes("--reset")) {
+    await resetCredentials();
+    return;
+  }
 
-        // ----------------------------------------------------
-        // Command line options
-        // ----------------------------------------------------
+  const verbose = args.includes("--verbose");
 
-        if (HELP) {
+  if (verbose) {
+    console.log("Verbose mode enabled.");
+    console.log();
+  }
 
-            showHelp();
+  // Get username/password from Windows Credential Manager.
+  const credentials = await getCredentials();
 
-            return;
+  let browser;
+
+  try {
+
+    // --------------------------------------------------------
+    // Launch Chromium
+    // --------------------------------------------------------
+
+    browser = await chromium.launch({
+      headless: true
+    });
+
+    // --------------------------------------------------------
+    // Create browser context
+    // --------------------------------------------------------
+
+    const context = await browser.newContext({
+      ignoreHTTPSErrors: true
+    });
+
+    // --------------------------------------------------------
+    // Create page
+    // --------------------------------------------------------
+
+    const page = await context.newPage();
+
+    // --------------------------------------------------------
+    // Attempt login
+    // --------------------------------------------------------
+
+    for (let attempt = 1; attempt <= CONFIG.maxRetries; attempt++) {
+
+      console.log(
+        `Attempt ${attempt}/${CONFIG.maxRetries}`
+      );
+
+      try {
+
+        const success = await loginAttempt(
+          page,
+          credentials
+        );
+
+        if (success) {
+          return;
         }
 
+      } catch (error) {
 
-        if (RESET_CREDENTIALS) {
+        console.error(
+          `Attempt ${attempt} failed:`,
+          error.message
+        );
+      }
 
-            await deleteCredentials();
-
-            return;
-        }
-
-
-        // ----------------------------------------------------
-        // Start
-        // ----------------------------------------------------
-
-        log("");
-        log("=================================");
-        log("       IIT GOA WIFI LOGIN");
-        log("=================================");
-        log("");
-
-
-        // ----------------------------------------------------
-        // Launch Chromium
-        // ----------------------------------------------------
-
-        debug(
-            "Launching Chromium..."
+      if (attempt < CONFIG.maxRetries) {
+        console.log(
+          `Retrying in ${CONFIG.retryDelay} ms...`
         );
 
-
-        browser =
-            await chromium.launch({
-                headless: true
-            });
-
-
-        const context =
-            await browser.newContext({
-
-                /*
-                 * Required because FortiGate's
-                 * captive portal may use a
-                 * certificate that doesn't match
-                 * the intercepted hostname.
-                 */
-                ignoreHTTPSErrors: true
-            });
-
-
-        const page =
-            await context.newPage();
-
-
-        // ----------------------------------------------------
-        // Check authentication
-        // ----------------------------------------------------
-
-        const connectivity =
-            await checkConnectivity(page);
-
-
-        if (
-            !connectivity.success
-        ) {
-
-            throw new Error(
-                "Could not reach the network. Make sure you are connected to IIT Goa WiFi."
-            );
-        }
-
-
-        const currentURL =
-            connectivity.url;
-
-
-        debug(
-            `Current URL: ${currentURL}`
-        );
-
-
-        // ----------------------------------------------------
-        // Already authenticated
-        // ----------------------------------------------------
-
-        if (
-            !isFortiGatePage(
-                currentURL
-            )
-        ) {
-
-            log(
-                "✓ Already authenticated."
-            );
-
-
-            notify(
-                "IIT Goa WiFi",
-                "✓ Already connected."
-            );
-
-
-            return;
-        }
-
-
-        // ----------------------------------------------------
-        // Login
-        // ----------------------------------------------------
-
-        await performLogin(page);
-
-
-        // ----------------------------------------------------
-        // Verify
-        // ----------------------------------------------------
-
-        const authenticated =
-            await verifyAuthentication(
-                page
-            );
-
-
-        if (authenticated) {
-
-            log("");
-            log(
-                "================================="
-            );
-            log(
-                "✓ IIT GOA WIFI LOGIN SUCCESSFUL"
-            );
-            log(
-                "================================="
-            );
-            log("");
-
-
-            notify(
-                "IIT Goa WiFi",
-                "✓ Successfully authenticated."
-            );
-
-
-        } else {
-
-            log("");
-            log(
-                "================================="
-            );
-            log(
-                "✗ IIT GOA WIFI LOGIN FAILED"
-            );
-            log(
-                "================================="
-            );
-            log("");
-
-
-            notify(
-                "IIT Goa WiFi",
-                "✗ Authentication failed."
-            );
-
-
-            log(
-                "If your password has changed, reset your saved credentials with:"
-            );
-
-            log("");
-            log(
-                "    node app.js --reset"
-            );
-
-            log("");
-
-
-            process.exitCode = 1;
-        }
-
-
-    } catch (error) {
-
-        log("");
-        log(
-            "================================="
-        );
-        log(
-            "✗ IIT GOA WIFI LOGIN ERROR"
-        );
-        log(
-            "================================="
-        );
-        log("");
-
-
-        log(
-            error.message
-        );
-
-
-        notify(
-            "IIT Goa WiFi",
-            "✗ Could not connect or authenticate."
-        );
-
-
-        log("");
-
-
-        process.exitCode = 1;
-
-
-    } finally {
-
-        if (browser) {
-
-            await browser.close();
-        }
+        await sleep(CONFIG.retryDelay);
+      }
     }
+
+    // --------------------------------------------------------
+    // All attempts failed
+    // --------------------------------------------------------
+
+    console.log(
+      "✗ Could not authenticate to IIT Goa WiFi."
+    );
+
+    notify(
+      "IIT Goa WiFi",
+      "✗ Authentication failed."
+    );
+
+  } finally {
+
+    // --------------------------------------------------------
+    // Always close browser
+    // --------------------------------------------------------
+
+    if (browser) {
+      await browser.close();
+    }
+  }
 }
 
 
 // ============================================================
-// START
+// PROGRAM ENTRY POINT
 // ============================================================
 
 main()
-    .then(() => {
-        process.exit(0);
-    })
-    .catch(err => {
-        console.error(err);
-        process.exit(1);
-    });
+  .then(() => {
+    process.exit(0);
+  })
+  .catch(error => {
+    console.error(error);
+    process.exit(1);
+  });
